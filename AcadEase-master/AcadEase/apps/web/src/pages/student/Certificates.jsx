@@ -1,0 +1,248 @@
+import { useEffect, useState } from "react";
+import { Download, Plus } from "lucide-react";
+import api from "../../api/client.js";
+import { useAuth } from "../../context/AuthContext.jsx";
+import AppShell from "../../components/layout/AppShell.jsx";
+import Card from "../../components/ui/Card.jsx";
+import Badge from "../../components/ui/Badge.jsx";
+import Button from "../../components/ui/Button.jsx";
+import Toast, { useToast } from "../../components/ui/Toast.jsx";
+
+const CERT_TYPES = ["bonafide", "completion", "attendance", "character", "merit"];
+const PURPOSES   = ["Bank Account", "Visa Application", "Scholarship", "Job Application", "Other"];
+
+const TYPE_COLORS = {
+  bonafide:   "bg-[#E8ECFF] text-signal",
+  completion: "bg-[#E9FCE0] text-success",
+  attendance: "bg-[#E6FAF8] text-teal",
+  character:  "bg-[#FFF3DC] text-warning",
+  merit:      "bg-[#FFF3DC] text-warning",
+};
+
+// A certificate is authorised by two institutions in turn. Showing the student
+// exactly where their request is stops the "has anyone even looked at this?"
+// phone call to the college office.
+const STAGE_STEPS = [
+  { key: "requested", label: "Requested" },
+  { key: "college_review", label: "University approval" },
+  { key: "tnteu_review", label: "TNTEU counter-signature" },
+  { key: "issued", label: "Issued" },
+];
+
+function StageTrail({ request }) {
+  if (!request.stage) return null;
+
+  const order = ["college_review", "tnteu_review", "issued"];
+  const rejected = request.stage === "rejected";
+  const currentIndex = rejected ? -1 : order.indexOf(request.stage);
+  const approvedStages = new Set((request.approvals || []).filter((a) => a.decision === "approved").map((a) => a.stage));
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 mt-2">
+      {STAGE_STEPS.map((step, index) => {
+        const done =
+          step.key === "requested" ||
+          approvedStages.has(step.key) ||
+          (step.key === "issued" && request.stage === "issued");
+        const active = !rejected && index - 1 === currentIndex;
+
+        return (
+          <span key={step.key} className="flex items-center gap-1.5">
+            {index > 0 && <span className="text-text-muted text-[10px]">›</span>}
+            <span
+              className={`text-[10px] px-2 py-0.5 rounded-pill font-medium ${
+                done ? "bg-[#E9FCE0] text-success"
+                : active ? "bg-[#FFF3DC] text-warning"
+                : rejected ? "bg-[#F1EFE6] text-text-muted"
+                : "bg-[#F1EFE6] text-text-muted"
+              }`}
+            >
+              {step.label}
+            </span>
+          </span>
+        );
+      })}
+      {rejected && (
+        <span className="text-[10px] px-2 py-0.5 rounded-pill bg-[#FFE7E9] text-danger font-medium">
+          Rejected
+        </span>
+      )}
+    </div>
+  );
+}
+
+export default function StudentCertificates() {
+  const { user } = useAuth();
+  const [requests, setRequests] = useState([]);
+  const [loading, setLoading]   = useState(true);
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm]         = useState({ type: "", purpose: "", notes: "" });
+  const [submitting, setSubmitting] = useState(false);
+  const { toast, showToast, clearToast } = useToast();
+
+  async function load() {
+    const res = await api.get(`/certificates/requests/student/${user.userId}`);
+    setRequests(res.data.requests);
+  }
+
+  useEffect(() => {
+    if (!user) return;
+    load().finally(() => setLoading(false));
+  }, [user]);
+
+  async function submitRequest(e) {
+    e.preventDefault();
+    setSubmitting(true);
+    try {
+      await api.post("/certificates/request", form);
+      showToast("Certificate request submitted.", "success");
+      setShowForm(false);
+      setForm({ type: "", purpose: "", notes: "" });
+      await load();
+    } catch (err) {
+      showToast(err.response?.data?.error || "Failed to submit request.", "error");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleDownload(certId) {
+    try {
+      const res = await api.get(`/certificates/download/${certId}`, { responseType: "blob" });
+      const blob = new Blob([res.data], { type: res.headers["content-type"] || "application/pdf" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${certId}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      // With responseType "blob" an error body arrives as a Blob, not JSON, so
+      // it has to be read back before the message can be shown. A 410 means the
+      // record is fine but the stored PDF is gone — say that, rather than
+      // implying the student's certificate is invalid.
+      let message = "Failed to download certificate.";
+      try {
+        const body = err?.response?.data;
+        const text = body instanceof Blob ? await body.text() : null;
+        const parsed = text ? JSON.parse(text) : body;
+        message = parsed?.detail || parsed?.error || message;
+      } catch {
+        /* keep the generic message */
+      }
+      showToast(message, "error");
+    }
+  }
+
+  return (
+    <AppShell>
+      <Toast toast={toast} onClose={clearToast} />
+
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h1 className="font-display text-2xl font-bold text-text-primary">Certificates</h1>
+          <p className="text-sm text-text-secondary mt-0.5">Request and download your certificates.</p>
+        </div>
+        <Button onClick={() => setShowForm(true)} className="flex items-center gap-2">
+          <Plus size={15} /> Request
+        </Button>
+      </div>
+
+      {loading ? (
+        <div className="space-y-3">
+          {[1,2,3].map((i) => <div key={i} className="h-20 bg-white border border-border rounded-card animate-pulse" />)}
+        </div>
+      ) : requests.length === 0 ? (
+        <div className="text-center py-12">
+          <p className="text-text-muted text-sm">No certificate requests yet.</p>
+          <Button onClick={() => setShowForm(true)} variant="secondary" className="mt-4">
+            Request your first certificate
+          </Button>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {requests.map((r) => (
+            <Card key={r._id} className="p-4">
+              <div className="flex items-start justify-between">
+                <div className="flex items-start gap-3">
+                  <span className={`px-3 py-1 rounded-pill text-xs font-semibold capitalize ${TYPE_COLORS[r.type] || "bg-[#F1EFE6] text-text-secondary"}`}>
+                    {r.type}
+                  </span>
+                  <div>
+                    <p className="font-medium text-text-primary text-sm">{r.purpose}</p>
+                    <p className="text-xs text-text-muted mt-0.5">{new Date(r.createdAt).toDateString()}</p>
+                    {r.rejectionReason && (
+                      <p className="text-xs text-danger mt-1">
+                        Rejected by {r.rejectedStage === "tnteu_review" ? "TNTEU" : "your university"}: {r.rejectionReason}
+                      </p>
+                    )}
+                    {/* Reissued after a grievance: the student is holding a
+                        certificate they did not request, so say why. */}
+                    {r.supersedes && (
+                      <p className="text-xs text-signal mt-1 leading-relaxed">
+                        Reissued from a corrected record — this replaces an earlier copy, which is now
+                        marked superseded. Download this one.
+                      </p>
+                    )}
+                    {r.certificateStatus === "revoked" && r.revocationType === "superseded" && (
+                      <p className="text-xs text-text-muted mt-1 leading-relaxed">
+                        Superseded by a corrected certificate.
+                      </p>
+                    )}
+                    <StageTrail request={r} />
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <Badge status={r.stage === "issued" ? "approved" : r.status} />
+                  {r.status === "approved" && r.certId && (
+                    <button
+                      onClick={() => handleDownload(r.certId)}
+                      className="w-8 h-8 rounded-pill bg-[#E8ECFF] text-signal flex items-center justify-center hover:bg-signal hover:text-white transition-colors"
+                      title="Download PDF"
+                    >
+                      <Download size={14} />
+                    </button>
+                  )}
+                </div>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {showForm && (
+        <div className="fixed inset-0 bg-ink/50 flex items-center justify-center z-40 p-4">
+          <Card className="w-full max-w-md shadow-lift">
+            <h2 className="font-display text-lg font-bold text-text-primary mb-4">Request a Certificate</h2>
+            <form onSubmit={submitRequest} className="space-y-4">
+              <div>
+                <label className="label">Certificate Type</label>
+                <select required value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })} className="input">
+                  <option value="">Select type</option>
+                  {CERT_TYPES.map((t) => <option key={t} value={t} className="capitalize">{t}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="label">Purpose</label>
+                <select required value={form.purpose} onChange={(e) => setForm({ ...form, purpose: e.target.value })} className="input">
+                  <option value="">Select purpose</option>
+                  {PURPOSES.map((p) => <option key={p} value={p}>{p}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="label">Notes <span className="text-text-muted font-normal">(optional)</span></label>
+                <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} rows={2} className="input" />
+              </div>
+              <div className="flex gap-3 pt-1">
+                <Button type="submit" disabled={submitting} className="flex-1">{submitting ? "Submitting…" : "Submit Request"}</Button>
+                <Button type="button" variant="secondary" onClick={() => setShowForm(false)}>Cancel</Button>
+              </div>
+            </form>
+          </Card>
+        </div>
+      )}
+    </AppShell>
+  );
+}
